@@ -1,0 +1,413 @@
+apiVersion: apps/v1
+kind: {{ include "deyploymant.type" $ }}
+metadata:
+  name: {{ include "akeyless-api-gw.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "akeyless-api-gw.labels" . | nindent 4 }}
+  {{- if .Values.deployment.labels }}
+    {{- toYaml .Values.deployment.labels | nindent 4 }}
+  {{- end }}
+  {{- if .Values.deployment.annotations }}
+  annotations:
+  {{- toYaml .Values.deployment.annotations | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if and (eq (include "deyploymant.type" $) "Deployment") (not .Values.HPA.enabled) }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "akeyless-api-gw.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      {{- if .Values.deployment.pod.annotations }}
+      annotations:
+          {{- toYaml .Values.deployment.pod.annotations | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "akeyless-api-gw.selectorLabels" . | nindent 8 }}
+        {{- if .Values.deployment.labels }}
+          {{- toYaml .Values.deployment.labels | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- if .Values.deployment.affinity.enabled }}
+      affinity:
+      {{- toYaml .Values.deployment.affinity.data | nindent 8 }}
+      {{- end }}
+      {{- if .Values.deployment.securityContext }}
+        {{- if .Values.deployment.securityContext.enabled }}
+      securityContext:
+         runAsUser: {{ .Values.deployment.securityContext.runAsUser }}
+         fsGroup: {{ .Values.deployment.securityContext.fsGroup }}
+        {{- end }}
+      {{- end }}
+      serviceAccountName: {{ template "akeyless-api-gw.getServiceAccountName" . }}
+      {{- if .Values.deployment.nodeSelector }}
+      nodeSelector:
+      {{ toYaml .Values.deployment.nodeSelector | indent 4 }}
+      {{- end }}
+      {{- if or (not (eq (include "akeyless-api-gw.customerFragmentExist" .) "")) (eq (include "akeyless-api-gw.logandConfExist" .) "true") (eq (include "akeyless-api-gw.tlsCertificateExist" .) "true" ) (.Values.metrics.enabled)}}
+      volumes:
+      - name: akeyless-config
+        emptyDir: {}
+      {{- if not (eq (include "akeyless-api-gw.customerFragmentExist" .) "") }}
+      - name: customer-fragments-secret
+        secret:
+          secretName: {{ include "akeyless-api-gw.customerFragmentExist" . }}
+          items:
+            - key: customer-fragments
+              path: customer_fragments.json
+      {{- end }}
+      {{- if eq (include "akeyless-api-gw.logandConfExist" .) "true"}}
+      - name: logand-conf
+        secret:
+          secretName: {{ include "akeyless-api-gw.logandSecretName" . }}
+          items:
+            - key: logand-conf
+              path: logand.conf
+      {{- end }}
+      {{- if eq (include "akeyless-api-gw.tlsCertificateExist" .) "true" }}
+      - name: tls-conf
+        secret:
+          secretName: {{ include "akeyless-api-gw.tlsSecretName" . }}
+          defaultMode: 420
+      {{- end }}
+      {{- if and (.Values.metrics.enabled) (not (eq (include "akeyless-api-gw.metricsSecretExist" .) "")) }}
+      - name: otelcol-metrics-config
+        secret:
+          secretName: {{ include "akeyless-api-gw.metricsSecretExist" . }}
+      {{- end }}
+      initContainers:
+        # Since k8s 1.9.4, config maps mount read-only volumes. Since the Docker image also writes to the config file,
+        # the file must be mounted as read-write. We use init containers to copy from the config map read-only
+        # path, to a read-write path
+        - name: bootstrap
+          image: "{{ .Values.initContainer.image.repository }}:{{ .Values.initContainer.image.tag }}"
+          imagePullPolicy: {{ .Values.initContainer.image.pullPolicy }}
+          command: ['sh']
+          args:
+            - "-c"
+            - |
+              set -ex
+            {{- if not (eq (include "akeyless-api-gw.customerFragmentExist" .) "") }}
+              [ "$(ls /customer_fragments)" ] && cp /customer_fragments/* {{include "akeyless-api-gw.root.config.path" $}}/.akeyless
+            {{- end }}
+            {{- if eq (include "akeyless-api-gw.logandConfExist" .) "true"}}
+              cp /logand_conf/logand.conf {{include "akeyless-api-gw.root.config.path" $}}/.akeyless/logand.conf
+            {{- end }} 
+            {{- if eq (include "akeyless-api-gw.tlsCertificateExist" .) "true"}}
+              cp /tls_conf/{{ include "akeyless-api-gw.certFileName" . }} {{include "akeyless-api-gw.root.config.path" $}}/.akeyless/akeyless-api-cert.crt
+            {{- end }} 
+            {{- if eq (include "akeyless-api-gw.tlsPrivateKeyExist" .) "true"}}
+              cp /tls_conf/{{ include "akeyless-api-gw.keyFileName" . }} {{include "akeyless-api-gw.root.config.path" $}}/.akeyless/akeyless-api-cert.key
+            {{- end }} 
+          volumeMounts:
+          {{- if not (eq (include "akeyless-api-gw.customerFragmentExist" .) "") }}
+            - name: customer-fragments-secret
+              mountPath: /customer_fragments
+          {{- end }}
+            - name: akeyless-config
+              mountPath: {{include "akeyless-api-gw.root.config.path" $}}/.akeyless
+          {{- if eq (include "akeyless-api-gw.logandConfExist" .) "true"}}
+            - name: logand-conf
+              mountPath: /logand_conf
+          {{- end}}
+          {{- if eq (include "akeyless-api-gw.tlsCertificateExist" .) "true"}}
+            - name: tls-conf
+              mountPath: /tls_conf
+          {{- end}}
+      {{- end }} #spec
+      containers:
+        - name: {{ .Values.containerName }}
+          {{- if .Values.akeylessStrictMode  }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}-akeyless"
+          {{else}}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          {{- end}}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- if .Values.deployment.containerSecurityContext }}
+          securityContext:
+            {{- toYaml .Values.deployment.containerSecurityContext | nindent 12 }}
+          {{- end }}
+          ports:
+            - name: web
+              containerPort: 18888
+            - name: configure-app
+              containerPort: 8000
+            - name: legacy-api
+              containerPort: 8080
+            - name: api
+              containerPort: 8081
+            - name: hvp
+              containerPort: 8200
+            - name: kmip
+              containerPort: 5696
+          livenessProbe:
+            httpGet:
+              path: {{ include "health_check_path" . }}
+              port: 8080
+              {{- if .Values.TLSConf.akeylessAPIServices }}
+              scheme: HTTPS
+              {{- end }}
+{{- toYaml .Values.livenessProbe | trim | nindent 12 }}
+          readinessProbe:
+            httpGet:
+              path: {{ include "health_check_path" . }}
+              port: 8080
+              {{- if .Values.TLSConf.akeylessAPIServices }}
+              scheme: HTTPS
+              {{- end }}
+{{- toYaml .Values.readinessProbe | trim | nindent 12 }}
+         {{- if or (not (eq (include "akeyless-api-gw.customerFragmentExist" .) "")) (eq (include "akeyless-api-gw.logandConfExist" .) "true") (eq (include "akeyless-api-gw.tlsCertificateExist" .) "true") ( .Values.metrics.enabled)}}
+          volumeMounts:
+            - name: akeyless-config
+              mountPath: {{include "akeyless-api-gw.root.config.path" $}}/.akeyless
+          {{- if and (.Values.metrics.enabled) (not (eq (include "akeyless-api-gw.metricsSecretExist" .) "")) }}
+            - name: otelcol-metrics-config
+              mountPath: /akeyless/otel-config.yaml
+              subPath: otel-config.yaml
+          {{- end}}
+          {{- end}}
+          resources:
+{{- toYaml .Values.resources | nindent 12 }}
+          env:
+          {{- if .Values.fixedArtifactRepository }}
+            - name: ARTIFACTS_REPO
+              value: {{ .Values.fixedArtifactRepository  }}
+          {{- end }}
+          {{- if .Values.deployment.fips.enabled }}
+            - name: FIPS
+              value: {{ .Values.deployment.fips.enabled }}
+          {{- end }}
+          {{- if not (eq (include "akeyless-api-gw.adminAccessIdExist" .) "") }}
+            - name: ADMIN_ACCESS_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "akeyless-api-gw.adminAccessIdExist" . }}
+                  key: admin-access-id
+          {{- end }}
+          {{- if not (eq (include "akeyless-api-gw.allowedAccessIDsExist" .) "") }}
+            - name: ALLOWED_ACCESS_IDS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "akeyless-api-gw.allowedAccessIDsExist" . }}
+                  key: allowed-access-ids
+          {{- end }}
+          {{- if not (eq (include "akeyless-api-gw.allowedAccessPermissionsExist" .) "") }}
+            - name: ALLOWED_ACCESS_PERMISSIONS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "akeyless-api-gw.allowedAccessPermissionsExist" . }}
+                  key: allowed-access-permissions
+          {{- end }}
+          {{- if not (eq (include "akeyless-api-gw.adminAccessKeyExist" .) "") }}
+            - name: ADMIN_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "akeyless-api-gw.adminAccessKeyExist" . }}
+                  key: admin-access-key
+          {{- end }}
+          {{- if not (eq (include "akeyless-api-gw.adminPasswordExist" .) "") }}
+            - name: ADMIN_PASSWORD 
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "akeyless-api-gw.adminPasswordExist" . }}
+                  key: admin-password
+          {{- end }}
+          {{- if not (eq (include "akeyless-api-gw.adminAccessCertExist" .) "") }}
+            - name: ADMIN_CERTIFICATE 
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "akeyless-api-gw.adminAccessCertExist" . }}
+                  key: admin-certificate 
+          {{- end }}
+          {{- if not (eq (include "akeyless-api-gw.adminAccessCertKeyExist" .) "") }}
+            - name: ADMIN_CERTIFICATE_KEY 
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "akeyless-api-gw.adminAccessCertKeyExist" . }}
+                  key: admin-certificate-key
+          {{- end }}
+          {{- if .Values.akeylessUserAuth.clusterName }}
+            - name: CLUSTER_NAME
+              value: {{ .Values.akeylessUserAuth.clusterName }}
+          {{- end }}
+          {{- if .Values.akeylessUserAuth.restrictServiceToAccessIds }}
+            - name: RESTRICT_SERVICE_TO_ACCESS_IDS
+              value: {{ .Values.akeylessUserAuth.restrictServiceToAccessIds | quote }}
+          {{- end }}
+          {{- if .Values.akeylessUserAuth.blockedAccessIds }}
+            - name: BLOCKLIST_ACCESS_IDS
+              value: {{ .Values.akeylessUserAuth.blockedAccessIds | join "," | quote }}
+          {{- end }}
+          {{- if .Values.akeylessUserAuth.restrictAccessToAdminAccount }}
+            - name: RESTRICT_ACCESS_TO_ADMIN_ACCOUNT
+              value: {{ .Values.akeylessUserAuth.restrictAccessToAdminAccount | quote }}
+          {{- end }}
+          {{- if .Values.akeylessUserAuth.initialClusterDisplayName }}
+            - name: INITIAL_DISPLAY_NAME
+              value: {{ .Values.akeylessUserAuth.initialClusterDisplayName }}
+          {{- end }}
+          {{- if .Values.akeylessUserAuth.configProtectionKeyName }}
+            - name: CONFIG_PROTECTION_KEY_NAME
+              value: {{ .Values.akeylessUserAuth.configProtectionKeyName }}
+          {{- end }}
+          {{- if .Values.akeylessUserAuth.useGwForOidc }}
+            - name: AKEYLESS_OIDC_GW_AUTH
+              value: "true"
+          {{- end }}
+          {{- if not (eq (include "akeyless-api-gw.adminAccessUidExist" .) "")  }}
+            - name: ADMIN_UID_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "akeyless-api-gw.adminAccessUidExist" . }}
+                  key: admin-uid-init-token
+            {{- end }}
+            {{- if or (eq (include "akeyless-api-gw.adminAccessUidExist" .) "true") ( .Values.cachingConf.clusterCache.enabled) }}
+            - name:  GATEWAY_CLUSTER_CACHE
+              value: enable
+            - name: REDIS_ADDR
+              value: {{  include "akeyless-api-gw.fullname" . }}-cache-svc:6379
+            - name: REDIS_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "akeyless-api-gw.cacheSecretName" . }}
+                  key: cache-pass
+          {{- end }}
+          {{- if .Values.cachingConf.clusterCache.enabled }}
+            - name: USE_CLUSTER_CACHE
+              value: "true"
+            - name: CACHE_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "akeyless-api-gw.clusterCacheEncryptionKeyExist" . }}
+                  key: cluster-cache-encryption-key
+          {{- end }}
+          {{- if .Values.universalIdentity.uidRotationInterval }}
+            - name: UID_ROTATE_INTERVAL
+              value: {{ .Values.universalIdentity.uidRotationInterval }}
+          {{- end }}
+          {{- if .Values.universalIdentity.uidCreateChildTokenPerPod }}
+            - name: UID_CREATE_CHILD_TOKEN_PER_POD
+              value: {{ .Values.universalIdentity.uidCreateChildTokenPerPod }}
+          {{- end }}
+          {{- if .Values.metrics.enabled }}
+            - name: ENABLE_METRICS
+              value: {{ .Values.metrics.enabled | quote }}
+            - name: MEM_LIMIT
+              valueFrom:
+                resourceFieldRef:
+                  containerName: {{ .Values.containerName }}
+                  resource: limits.memory
+          {{- end }}
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name         
+          # provision initial configuration
+          ## Defaults section
+          {{- if .Values.defaultsConf.defaultSamlAccessId }}
+            - name: DEFAULT_SAML_ACCESS_ID
+              value: {{ .Values.defaultsConf.defaultSamlAccessId }}
+          {{- end }}
+          {{- if .Values.defaultsConf.defaultOidcAccessId }}
+            - name: DEFAULT_OIDC_ACCESS_ID
+              value: {{ .Values.defaultsConf.defaultOidcAccessId }}
+          {{- end }}
+          {{- if .Values.defaultsConf.defaultCertificateAccessId }}
+            - name: DEFAULT_CERTIFICATE_ACCESS_ID
+              value: {{ .Values.defaultsConf.defaultCertificateAccessId }}
+          {{- end }}
+          {{- if .Values.defaultsConf.defaultEncryptionKey }}
+            - name: DEFAULT_ENCRYPTION_KEY
+              value: {{ .Values.defaultsConf.defaultEncryptionKey }}
+          {{- end }}
+           {{- if .Values.defaultsConf.defaultSecretLocation }}
+            - name: DEFAULT_SECRET_LOCATION
+              value: {{ .Values.defaultsConf.defaultSecretLocation }}
+          {{- end }}
+          ## sni proxy
+           {{- if .Values.TLSConf.enableSniProxy }}
+            - name: ENABLE_SNI_PROXY
+              value: "{{ .Values.TLSConf.enableSniProxy }}"
+          {{- end }}
+          ## tls config
+          {{- if .Values.TLSConf.akeylessWebUI }}
+            - name: ENABLE_TLS
+              value: "{{ .Values.TLSConf.akeylessWebUI }}"
+          {{- end }}
+          {{- if .Values.TLSConf.vaultProxy }}
+            - name: ENABLE_TLS_HVP
+              value: "{{ .Values.TLSConf.vaultProxy }}"
+          {{- end }}
+          {{- if .Values.TLSConf.akeylessAPIServices }}
+            - name: ENABLE_TLS_CURL
+              value: "{{ .Values.TLSConf.akeylessAPIServices }}"
+          {{- end }}
+          {{- if .Values.TLSConf.configurationManager }}
+            - name: ENABLE_TLS_CONFIGURE
+              value: "{{ .Values.TLSConf.configurationManager }}"
+          {{- end }}
+          {{- if .Values.TLSConf.minimumTlsVersion }}
+            - name: MIN_TLS_VERSION
+              value: "{{ .Values.TLSConf.minimumTlsVersion }}"
+          {{- end }}
+          {{- if .Values.TLSConf.excludeCipherSuites }}
+            - name: EXCLUDE_CIPHER_SUITES
+              value: "{{ .Values.TLSConf.excludeCipherSuites }}"
+          {{- end }}
+          ## caching section
+          {{- if .Values.cachingConf.enabled }}
+            - name: CACHE_ENABLE
+              value: "{{ .Values.cachingConf.enabled }}"
+          {{- end }}
+          {{- if .Values.cachingConf.cacheTTL }}
+            - name: CACHE_TTL
+              value: "{{ .Values.cachingConf.cacheTTL }}"
+          {{- end }}
+          {{- if .Values.cachingConf.proActiveCaching.enabled }}
+            - name: PROACTIVE_CACHE_ENABLE
+              value: "{{ .Values.cachingConf.proActiveCaching.enabled }}"
+          {{- end }}
+          {{- if .Values.cachingConf.proActiveCaching.minimumFetchingTime }}
+            - name: PROACTIVE_CACHE_MINIMUM_FETCHING_TIME
+              value: "{{ .Values.cachingConf.proActiveCaching.minimumFetchingTime }}"
+          {{- end }}
+          {{- if .Values.cachingConf.proActiveCaching.dumpInterval }}
+            - name: PROACTIVE_CACHE_DUMP_INTERVAL
+              value: "{{ .Values.cachingConf.proActiveCaching.dumpInterval }}"
+          {{- end }}
+          ## agreements section
+          {{- if .Values.loginPageAgreementLinks.endUserLicenseAgreement }}
+            - name: END_USER_LICENSE_AGREEMENT_LINK
+              value: {{ .Values.loginPageAgreementLinks.endUserLicenseAgreement }}
+          {{- end }}
+           {{- if .Values.loginPageAgreementLinks.privacyPolicy }}
+            - name: PRIVACY_POLICY_LINK
+              value: {{ .Values.loginPageAgreementLinks.privacyPolicy }}
+          {{- end }}
+          # end provision
+            - name: VERSION
+              value: {{ include "version" . }}
+          {{- if .Values.httpProxySettings.http_proxy }}
+            - name: HTTP_PROXY
+              value: {{ .Values.httpProxySettings.http_proxy }}
+            - name: http_proxy
+              value: {{ .Values.httpProxySettings.http_proxy }}
+          {{- end }}
+          {{- if .Values.httpProxySettings.https_proxy }}
+            - name: HTTPS_PROXY
+              value: {{ .Values.httpProxySettings.https_proxy }}
+            - name: https_proxy
+              value: {{ .Values.httpProxySettings.https_proxy }}
+          {{- end }}
+          {{- if .Values.httpProxySettings.no_proxy }}
+            - name: NO_PROXY
+              value: {{ .Values.httpProxySettings.no_proxy }}
+            - name: no_proxy
+              value: {{ .Values.httpProxySettings.no_proxy }}
+          {{- end }}
+          {{- if .Values.env }}
+  {{- toYaml .Values.env | nindent 12 }}
+          {{- end }}

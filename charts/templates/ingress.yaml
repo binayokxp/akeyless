@@ -1,0 +1,62 @@
+{{- if .Values.ingress.enabled }}
+apiVersion: {{ include "checkIngressVersion.ingress.apiVersion" . }}
+kind: Ingress
+metadata:
+  name: {{ include "akeyless-api-gw.fullname" . }}
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+{{- include "akeyless-api-gw.labels" . | nindent 4 }}
+  {{- if .Values.ingress.labels }}
+    {{- toYaml .Values.ingress.labels | nindent 4 }}
+  {{- end }}
+  annotations:
+{{- if .Values.ingress.certManager }}
+    kubernetes.io/tls-acme: "true"
+{{- end }}
+{{- if .Values.ingress.annotations }}
+{{ toYaml .Values.ingress.annotations | indent 4 }}
+{{- end }}
+spec:
+{{- if .Values.ingress.ingressClassName }}
+  ingressClassName: {{ .Values.ingress.ingressClassName }}
+{{- end }}
+  rules:
+{{- range .Values.ingress.rules }}
+  - host: {{ .hostname }}
+    http:
+      paths:
+      - path: {{ .path | default $.Values.ingress.path }}
+{{- if eq (include "checkIngressVersion.ingress.apiVersion" $ ) "networking.k8s.io/v1" }}
+        pathType: {{ $.Values.ingress.pathType | default "ImplementationSpecific" }}
+        backend:
+         service:
+  {{- if .serviceName }}
+          name: {{ .serviceName }}
+  {{- else }}
+          name: {{ include "akeyless-api-gw.fullname" $ }}
+  {{- end }}
+          port:
+            name: {{ .servicePort }}
+{{- else }}
+        backend:
+  {{- if .serviceName }}
+         serviceName: {{ .serviceName }}
+  {{- else }}
+         serviceName: {{ include "akeyless-api-gw.fullname" $ }}
+  {{- end }}
+         servicePort: {{ .servicePort }}
+{{- end }}
+{{- end }}
+{{- if $.Values.ingress.tls }}
+  tls:
+    {{- range .Values.ingress.rules }}
+    - hosts:
+      - {{ .hostname }}
+      {{- if $.Values.ingress.certManager }}
+      {{$data := dict "hostname" .hostname "existingSecret" $.Values.ingress.existingSecret}}
+      secretName: {{ include "akeyless-api-gw.ingressSecretTLSName" $data }}
+      {{- end }}
+    {{- end }}
+{{- end }}
+
+{{- end }}

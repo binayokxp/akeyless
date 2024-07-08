@@ -1,0 +1,28 @@
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "akeyless-api-gw.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "akeyless-api-gw.labels" . | nindent 4 }}
+  {{- if .Values.service.labels }}
+    {{- toYaml .Values.service.labels | nindent 4 }}
+  {{- end }}
+  annotations:
+  {{- toYaml .Values.service.annotations | nindent 4 }}
+spec:
+  {{- if .Values.ingress.enabled }}
+  type: NodePort
+  {{- else }}
+  type: {{ required "A valid .Values.service.type entry required!" .Values.service.type }}
+  {{- end }}
+  ports:
+    {{- range .Values.service.ports }}
+    - port: {{ .port }}
+      targetPort: {{ .name }}
+      protocol: TCP
+      name: {{ .name }}
+    {{- end }}
+  selector:
+    {{- include "akeyless-api-gw.selectorLabels" . | nindent 4 }}
