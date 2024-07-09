@@ -250,8 +250,8 @@ akeylessUserAuth:
   # Use k8s existing secret, must include the following key: admin-uid-init-token
   adminUIDInitTokenExistingSecret:
 
-  clusterName:
-  initialClusterDisplayName:
+  clusterName: corporatebank
+  initialClusterDisplayName: CB_DEV
   # The key which is used to encrypt the API Gateway configuration. 
   # If left empty - the account’s default key will be used. 
   # This key can be determined on cluster bringup only and cannot be modified afterwards
